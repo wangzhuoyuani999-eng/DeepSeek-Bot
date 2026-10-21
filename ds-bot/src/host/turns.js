@@ -2,7 +2,7 @@
 // triggered, the waiters and inboxes of group rounds, and routing a finished turn's reply.
 //
 // Turn tracking: which turns were triggered by another Bot, and what they said.
-import { HANDOFF_ACK, MESSAGE_INLINE_MAX, REFERENCE_KIND, REPLY_KIND, SOURCE_KIND } from './constants.js'
+import { HANDOFF_ACK, MESSAGE_INLINE_MAX, REFERENCE_KIND, REPLY_KIND, ROOM_WORK_FILES_MAX, ROOM_WORK_GAP_MS, ROOM_WORK_LINES_MAX, SOURCE_KIND } from './constants.js'
 import { absoluteLinks } from './links.js'
 import { textOf } from './text.js'
 import { reminderText } from './schedules.js'
@@ -179,6 +179,111 @@ export function install(rt) {
       if (text !== '') void rt.roomStepText?.(id, info, text, entry.shown === 0)?.catch(error => rt.warn('ds-bot: step text from %s not posted: %s', id, error))
     }
   }
+
+  // The group also hears the work itself, not only what the member chooses to say: the
+  // files it edits and the command it runs, as short lines posted in its name while it
+  // goes. Lines leave at most every ROOM_WORK_GAP_MS and a burst lands as one line, so a
+  // long turn shows steady progress without turning into a wall of messages. Only paths
+  // and the command's program and subcommand go out: never an option or a value that
+  // could carry a key.
+  const FILE_TOOLS = new Set(['write', 'edit', 'multi_edit', 'apply_patch', 'notebook_edit', 'create_file', 'str_replace_editor'])
+  const SHELL_TOOLS = new Set(['pwsh', 'bash', 'shell', 'run_command', 'exec', 'terminal', 'cmd', 'powershell'])
+  const workNotes = new Map()
+  const chineseUi = () => /^Chinese/i.test(rt.uiLanguage?.() ?? '')
+  const workArgs = (value) => {
+    if (value !== null && typeof value === 'object') return value
+    try { return JSON.parse(String(value ?? '')) } catch { return {} }
+  }
+  // A path as the group reads it: relative to the Session's folder when it is inside it,
+  // else its last three parts, so a long working folder never fills the line.
+  const workPath = (session, value) => {
+    let text = String(value ?? '').trim().replace(/^file:\/\//i, '')
+    if (text === '') return ''
+    const root = rt.sessionFolder?.(session)
+    if (typeof root === 'string' && root !== '' && text.toLowerCase().startsWith(root.toLowerCase())) text = text.slice(root.length)
+    text = text.replace(/^[\\/]+/, '')
+    const parts = text.split(/[\\/]/).filter(Boolean)
+    if (parts.length > 3) text = `…/${parts.slice(-3).join('/')}`
+    return text.length > 60 ? `…${text.slice(-58)}` : text
+  }
+  // Program and subcommand only: options and assignments may hold a token or a password.
+  const workCommand = (value) => {
+    const line = String(value ?? '').split(/\r?\n/)[0].trim()
+    const kept = []
+    for (const token of line.split(/\s+/)) {
+      if (token === '' || token.includes('=') || token.startsWith('-')) break
+      kept.push(token.length > 40 ? `${token.slice(0, 37)}…` : token)
+      if (kept.length === 3) break
+    }
+    return kept.join(' ')
+  }
+  const workLine = (note) => {
+    const zh = chineseUi()
+    const lines = []
+    if (note.files.length > 0) {
+      const shown = note.files.slice(0, ROOM_WORK_FILES_MAX).join(zh ? '、' : ', ')
+      const rest = note.files.length - ROOM_WORK_FILES_MAX
+      lines.push(zh
+        ? `改动 ${note.files.length} 个文件：${shown}${rest > 0 ? ' 等' : ''}`
+        : `Edited ${note.files.length} file${note.files.length === 1 ? '' : 's'}: ${shown}${rest > 0 ? ', …' : ''}`)
+    }
+    for (const command of note.commands) lines.push(zh ? `运行：${command}` : `Ran: ${command}`)
+    // "@" would read as a call to a member, so a path with one keeps it as text.
+    return lines.join(zh ? '；' : '; ').replace(/@/g, '＠')
+  }
+  const clearWork = (id) => {
+    const note = workNotes.get(id)
+    if (note === undefined) return
+    if (note.timer !== undefined) clearTimeout(note.timer)
+    workNotes.delete(id)
+  }
+  const flushWork = (id) => {
+    const note = workNotes.get(id)
+    if (note === undefined) return
+    if (note.timer !== undefined) {
+      clearTimeout(note.timer)
+      note.timer = undefined
+    }
+    const text = workLine(note)
+    note.files = []
+    note.commands = []
+    if (text === '' || note.count >= ROOM_WORK_LINES_MAX) return
+    note.count += 1
+    note.at = Date.now()
+    void rt.postWorkLine?.(id, text).catch(error => rt.warn('ds-bot: work line from %s not posted: %s', id, error))
+  }
+  const noteWork = (id, session, tool, rawArgs) => {
+    if (rt.config?.groupWorkLines === false || !rt.groupOwners.has(id)) return
+    const entry = live.get(id)
+    const info = entry?.info
+    if (entry?.turn === undefined || info?.role !== 'room' || stoppedRoomTurns.has(info.exchangeId)) return
+    const args = workArgs(rawArgs)
+    let note = workNotes.get(id)
+    if (note === undefined) workNotes.set(id, note = { files: [], commands: [], at: 0, count: 0, timer: undefined })
+    // Past the turn's line budget the group has enough of its steps; the result still comes.
+    if (note.count >= ROOM_WORK_LINES_MAX) return
+    if (FILE_TOOLS.has(tool)) {
+      for (const key of ['file_path', 'path', 'target_file', 'notebook_path']) {
+        const path = workPath(session, args?.[key])
+        if (path !== '' && !note.files.includes(path)) note.files.push(path)
+      }
+      if (tool === 'apply_patch' && typeof args?.patch === 'string') {
+        for (const match of args.patch.matchAll(/^\*\*\* (?:Update|Add|Delete) File: (.+)$/gm)) {
+          const path = workPath(session, match[1])
+          if (path !== '' && !note.files.includes(path)) note.files.push(path)
+        }
+      }
+    } else if (SHELL_TOOLS.has(tool)) {
+      const command = workCommand(args?.command ?? args?.cmd ?? args?.script ?? args?.input ?? '')
+      if (command !== '' && !note.commands.includes(command)) note.commands.push(command)
+    } else return
+    if (note.files.length + note.commands.length === 0) return
+    if (note.timer !== undefined) return
+    const wait = note.at + ROOM_WORK_GAP_MS - Date.now()
+    if (wait <= 0) flushWork(id)
+    else note.timer = setTimeout(() => flushWork(id), wait)
+  }
+  ctx.effect(() => () => { for (const note of workNotes.values()) if (note.timer !== undefined) clearTimeout(note.timer); workNotes.clear() }, 'ds-bot: group work lines')
 
   // The reply a sender waits for, also when it wrote from a group, where it gets the
   // reply in its Session there while it is still a member. A sender that asked for it
@@ -367,12 +472,14 @@ export function install(rt) {
         startCall(id, entry, event.data?.callId, name, String(event.data?.arguments ?? ''))
         // A program is as quick as the tools it runs, so its sub-calls decide.
         if (rt.groupOwners.has(id) && name !== PROGRAM_TOOL) rt.workRoomTurn?.(id, name)
+        noteWork(id, session, name, event.data?.arguments)
         break
       }
       case 'tool/ptc-dispatch-start': {
         const name = String(event.data?.name ?? '')
         startCall(id, entry, event.data?.subCallId, name, JSON.stringify(event.data?.arguments ?? {}))
         if (rt.groupOwners.has(id)) rt.workRoomTurn?.(id, name)
+        noteWork(id, session, name, event.data?.arguments)
         break
       }
       case 'tool/ptc-dispatch':
@@ -517,6 +624,14 @@ export function install(rt) {
         setActivity(id, undefined)
         const info = entry.info
         const joined = entry.joined ?? []
+        // The last edits of the turn go out before its reply: a file the group never saw
+        // named is a file the group did not see changed. A stopped turn says nothing.
+        if (info?.role === 'room') {
+          if (event.data?.reason?.kind === 'aborted') clearWork(id)
+          else { flushWork(id); clearWork(id) }
+        } else {
+          clearWork(id)
+        }
         // What the group already saw of the turn is not posted again.
         const texts = entry.texts.slice(entry.shown)
         const shown = entry.shown > 0

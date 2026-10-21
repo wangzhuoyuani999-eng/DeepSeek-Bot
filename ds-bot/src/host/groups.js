@@ -85,7 +85,7 @@ export const referenceNote = references => (references?.length
   ? `Conversations the user referenced in this round:\n\n${references.map(reference => reference.text).join('\n\n')}`
   : '')
 
-const ROOM_REPLY = 'Reply with your message for the group, no name prefix: in a discussion, one or two short messages. When you are asked to do something, do it now with your tools. The group does not wait for you and sees what you write while you work: say what you will do, write again only when something matters, and end with the result, never a promise to do it later. Reply [PASS] to stay silent when you have nothing new to add or the message is for someone else.'
+const ROOM_REPLY = 'Reply with your message for the group, no name prefix: in a discussion, one or two short messages. When you are asked to do something, do it now with your tools. The group does not wait for you and sees what you write while you work: say what you will do, keep it posted on the files you change, the commands you run and what you find, and end with the result, never a promise to do it later. Reply [PASS] to stay silent when you have nothing new to add or the message is for someone else.'
 const ROOM_CALLS = 'Writing "@Name" calls that member next, to answer or to do what you ask; when it finishes work you gave it, you answer its result. To only mention a member, write its name without "@".'
 
 const slotLabel = (slot) => {
@@ -773,6 +773,14 @@ export function install(rt) {
     if (!quiet) room.lateRounds = (room.lateRounds ?? 0) + 1
     await rt.save()
     await postToRoom(room, member, text, { progress: true, ...(quiet ? { quiet: true } : {}) })
+  }
+
+  // A line about the work in progress itself (the files a member edits, the command it
+  // runs), posted in its name. It takes the same ways as a step line but is not held
+  // back to merge with the member's own words: a busy turn would keep it until the end.
+  rt.postWorkLine = async (sessionId, text) => {
+    const info = rt.live.get(sessionId)?.info
+    await postStep(sessionId, info, text)
   }
 
   // Lines a member writes close together reach the group as one message, so a burst of

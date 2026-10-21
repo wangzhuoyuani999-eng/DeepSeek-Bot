@@ -819,6 +819,64 @@ test('after the round went on, lines a member writes close together reach the gr
   assert.deepEqual(host.agentOf('r1').calls, [])
 })
 
+test('a member\'s file edits and commands reach the group as work lines, at once and at the turn\'s end', async (t) => {
+  const host = await start(t)
+  const first = host.round('c1', host.say('@Writer 整理文档'))
+  await settle(() => host.agentOf('gb').calls.length === 1)
+  host.begin('gb')
+  // The first action goes out at once.
+  host.emit('gb', 'tool/call', { callId: 'k1', name: 'edit', arguments: JSON.stringify({ file_path: 'C:/proj/src/a.ts' }) })
+  await settle(() => logLines(host).some(line => line.botId === 'b' && /^Edited 1 file: .*src\/a\.ts$/.test(line.text)))
+  // A burst within the gap waits for the turn's end, and a command keeps its program
+  // and subcommand only: an option could carry a key.
+  host.emit('gb', 'tool/call', { callId: 'k2', name: 'write', arguments: JSON.stringify({ file_path: 'C:/proj/src/b.ts' }) })
+  host.emit('gb', 'tool/call', { callId: 'k3', name: 'pwsh', arguments: JSON.stringify({ command: 'npm test --token=SECRET' }) })
+  await settle(() => true)
+  assert.equal(logLines(host).filter(line => line.botId === 'b').length, 1)
+  host.finish('gb', '整理好了。')
+  await settle(() => logLines(host).filter(line => line.botId === 'b').length >= 3)
+  const lines = logLines(host).filter(line => line.botId === 'b').map(line => line.text)
+  assert.match(lines[0], /^Edited 1 file: .*src\/a\.ts$/)
+  assert.match(lines[1], /^Edited 1 file: .*src\/b\.ts; Ran: npm test$/)
+  assert.doesNotMatch(lines[1], /SECRET/)
+  assert.match(lines[2], /^整理好了。$/)
+  await settle(() => first() !== undefined)
+})
+
+test('work lines follow the interface language', async (t) => {
+  const host = await start(t)
+  assert.equal((await host.call('state', { locale: 'zh-CN' })).ok, true)
+  const first = host.round('c1', host.say('@Writer 整理文档'))
+  await settle(() => host.agentOf('gb').calls.length === 1)
+  host.begin('gb')
+  host.emit('gb', 'tool/call', { callId: 'k1', name: 'write', arguments: JSON.stringify({ file_path: 'C:/proj/src/a.ts' }) })
+  await settle(() => logLines(host).some(line => line.botId === 'b'))
+  host.finish('gb', '好了。')
+  await settle(() => first() !== undefined)
+  const line = logLines(host).find(entry => entry.botId === 'b')
+  assert.match(line.text, /^改动 1 个文件：.*src\/a\.ts$/)
+})
+
+test('reading files or a private message in a group Session posts no work line', async (t) => {
+  const host = await start(t)
+  const first = host.round('c1', host.say('@Writer 看一下文档'))
+  await settle(() => host.agentOf('gb').calls.length === 1)
+  host.begin('gb')
+  host.emit('gb', 'tool/call', { callId: 'k1', name: 'read', arguments: JSON.stringify({ file_path: 'C:/proj/src/a.ts' }) })
+  await settle(() => true)
+  host.finish('gb', '看过了。')
+  await settle(() => first() !== undefined)
+  assert.equal(logLines(host).filter(line => line.botId === 'b' && line.kind === undefined).length, 1)
+
+  // A private message to a group Session is answered privately, without work lines.
+  host.emit('gb', 'turn/start', { turn: 2 })
+  host.emit('gb', 'user/message', { content: [{ type: 'text', text: '[Message from Tester]\n能帮我看下吗' }], source: { kind: 'bot', role: 'request', senderSessionId: 'c', senderName: 'Tester', exchangeId: 'x1', hop: 0 } })
+  host.emit('gb', 'tool/call', { callId: 'k2', name: 'edit', arguments: JSON.stringify({ file_path: 'C:/proj/src/b.ts' }) })
+  host.finish('gb', '看过了，没问题。')
+  await settle(() => host.agentOf('c').calls.length === 1)
+  assert.equal(logLines(host).filter(line => line.text.includes('src/b.ts')).length, 0)
+})
+
 test('a step that calls a member with @ after the round went on starts a round for that member', async (t) => {
   const host = await start(t)
   host.emit('gb', 'turn/start', { turn: 1 })

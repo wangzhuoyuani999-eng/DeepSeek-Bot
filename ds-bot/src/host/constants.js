@@ -37,7 +37,16 @@ export const LONG_HEAD = 1000
 export const READ_LINE_MAX = 2000
 export const ROOM_REPLY_TIMEOUT_MS = 240_000
 // Lines a member writes less than this apart while it works reach its group together.
-export const ROOM_STEP_GAP_MS = 30_000
+// Kept short so what a member says mid-work shows up while it still matters.
+export const ROOM_STEP_GAP_MS = 15_000
+// A member's automatic work lines (the files it edits, the command it runs) go to its
+// group at most this often, so a long turn is not silence and a busy one is not noise.
+export const ROOM_WORK_GAP_MS = 20_000
+// How many automatic work lines one turn may post, so a long turn cannot crowd the
+// group's log (and every member's next prompt) with its steps.
+export const ROOM_WORK_LINES_MAX = 8
+// Files one automatic work line names before the rest become "and N more".
+export const ROOM_WORK_FILES_MAX = 3
 export const SOURCE_KIND = 'bot'
 // The fixed reply that opens a fresh conversation part; it is never shown or sent on.
 export const HANDOFF_ACK = 'Noted. I have my handoff note and carry on from here.'
